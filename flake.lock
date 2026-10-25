@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "mol2chemfig-web-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1426251159,
+        "narHash": "sha256-KIcO8w2b9a0SIsPLwL/z53S3krLmt5C4FGnEFTUWmKE=",
+        "owner": "py-chemist",
+        "repo": "mol2chemfig-web",
+        "rev": "fe2be5ec5b704cb30792a5115338c601d919b702",
+        "type": "github"
+      },
+      "original": {
+        "owner": "py-chemist",
+        "repo": "mol2chemfig-web",
+        "rev": "fe2be5ec5b704cb30792a5115338c601d919b702",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1792898606,
+        "narHash": "sha256-Mg3rRjsbMqhSMxop5PYMXos8SwAjejrxSgVThTvP9eg=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "1f607aa79b6356ed45d3cd3c8079c196e79efa2c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "mol2chemfig-web-src": "mol2chemfig-web-src",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

@@ -1,0 +1,742 @@
+Port mol2chemfig-web to Python 3 and current TeX Live.
+
+- 2to3 conversion of the bundled mol2chemfig 1.4 package (print, raise and
+  except syntax, relative imports, urllib, dict views)
+- sort() calls that compared Bond / Indigo objects on ties now sort by key
+- MCFError messages no longer lose their first characters (Python 3 prints
+  the qualified exception name in tracebacks)
+- PubChem: SDF download uses the PUG REST URL, name lookup uses
+  Compound.smiles (isomeric_smiles is deprecated in PubChemPy 1.0.5)
+- pdfgen: run pdflatex through subprocess in its own directory instead of
+  os.chdir() (unsafe with threads), without shell escape and with a timeout;
+  read the PDF as bytes; locate mol2chemfig.sty next to the module
+- LaTeX template: chemfig >= 1.5 replaced \setatomsep and friends with
+  \setchemfig keys; fix the "margin=(margin)spt" typo
+- base64.encodestring() was removed in Python 3.9
+- app: write long molfiles to $MOL2CHEMFIG_DATA_DIR instead of the
+  (read-only) static/ directory
+- load jQuery and fonts over https so the app works behind TLS
+
+Apply after converting the CRLF line endings of mol2chemfig/pdfgen.py.
+
+diff --git a/app.py b/app.py
+index c640ef1..3540f81 100644
+--- a/app.py
++++ b/app.py
+@@ -1,9 +1,12 @@
+ from flask import Flask, render_template, url_for, request, jsonify
+ from chemistry.chemfig import smiles_mol_to_chemfig, get_name, update_chemfig
+-import os
++import os, tempfile
+ 
+ app = Flask(__name__)
+ 
++# molfiles that are too long to pass on the command line are written here
++data_dir = os.environ.get('MOL2CHEMFIG_DATA_DIR', tempfile.gettempdir())
++
+ @app.route('/mol_2_chemfig')
+ def home():    
+     return render_template('home.html', pdflink = "static/files/welcome.pdf")
+@@ -39,9 +42,9 @@ def smiles_to_chemfig():
+         chemfig, pdflink = smiles_mol_to_chemfig(lst,'-i direct', "-y {}".format(hydrogens), smiles_mol)
+         return jsonify(chem_fig = chemfig, pdf_link = pdflink)        
+     else:
+-         with open('static/files/molecule.mol', 'w') as f:
++         mol = os.path.join(data_dir, 'molecule.mol')
++         with open(mol, 'w') as f:
+              f.write(smiles_mol)
+-         mol = 'static/files/molecule.mol'
+          last_data[0] = mol
+          chemfig, pdflink  = smiles_mol_to_chemfig(lst, "-y {}".format(hydrogens), mol)
+          return jsonify(chem_fig = chemfig, pdf_link = pdflink)
+diff --git a/chemistry/chemfig.py b/chemistry/chemfig.py
+index 06f0e63..dcb7456 100644
+--- a/chemistry/chemfig.py
++++ b/chemistry/chemfig.py
+@@ -15,7 +15,7 @@ def smiles_mol_to_chemfig(*args):
+     if success:
+         pdfsuccess, pdfresult = pdfgen.pdfgen(result)        
+         if pdfsuccess:
+-            encoded = base64.encodestring(pdfresult)
++            encoded = base64.b64encode(pdfresult).decode('ascii')
+             pdflink = "data:application/pdf;base64,{}".format(encoded)
+         else:
+             pdflink = 'pdf generation foobared'            
+@@ -29,7 +29,7 @@ def smiles_mol_to_chemfig(*args):
+ def update_chemfig(data):
+     pdfsuccess, pdfresult = update_pdf(data)           
+     if pdfsuccess:
+-        encoded = base64.encodestring(pdfresult)
++        encoded = base64.b64encode(pdfresult).decode('ascii')
+         pdflink = "data:application/pdf;base64,{}".format(encoded)
+     else:
+         pdflink = 'pdf generation foobared'
+@@ -40,7 +40,7 @@ def update_chemfig(data):
+ def get_name(name):
+     chemical_name = pcp.get_compounds(name, 'name')
+     try:
+-        return chemical_name[0].isomeric_smiles
++        return chemical_name[0].smiles
+     except IndexError:
+         return "\n"
+         
+diff --git a/mol2chemfig/atom.py b/mol2chemfig/atom.py
+index bb814e8..069bffe 100644
+--- a/mol2chemfig/atom.py
++++ b/mol2chemfig/atom.py
+@@ -1,8 +1,8 @@
+ import math, string
+ 
+-import chemfig_mappings as cfm
++from . import chemfig_mappings as cfm
+ 
+-from common import debug
++from .common import debug
+ 
+ # some atoms should carry their hydrogens to the left, rather than
+ # to the right. This is applied to solitary atoms, but not to bonded
+diff --git a/mol2chemfig/bond.py b/mol2chemfig/bond.py
+index 09e4ed4..c74d8d9 100644
+--- a/mol2chemfig/bond.py
++++ b/mol2chemfig/bond.py
+@@ -5,8 +5,8 @@ My name is Bond. JAMES Bond.
+ from copy import deepcopy, copy
+ from math import atan, tan, pi
+ 
+-import chemfig_mappings as cfm
+-from common import debug
++from . import chemfig_mappings as cfm
++from .common import debug
+ 
+ # bond stereo properties and valences
+ from indigo import Indigo
+@@ -405,7 +405,7 @@ class Bond(object):
+         if self.start_atom.explicit:
+             start = 0
+         else:
+-            start_angles = self.upstream_angles().values()
++            start_angles = list(self.upstream_angles().values())
+             if start_angles[0] is not None:
+                 start = self.cotan100(0.5 * min(start_angles))
+             else:
+@@ -414,7 +414,7 @@ class Bond(object):
+         if self.end_atom.explicit:
+             end = 0
+         else:
+-            end_angles = self.downstream_angles().values()
++            end_angles = list(self.downstream_angles().values())
+             if end_angles[0] is not None:
+                 end = self.cotan100(0.5 * min(end_angles))
+             else:
+diff --git a/mol2chemfig/chemfig_mappings.py b/mol2chemfig/chemfig_mappings.py
+index 384d912..71bea16 100644
+--- a/mol2chemfig/chemfig_mappings.py
++++ b/mol2chemfig/chemfig_mappings.py
+@@ -6,9 +6,9 @@ the TeX syntax defined by the chemfig package.
+ '''
+ 
+ import textwrap
+-import common
++from . import common
+ 
+-from common import debug
++from .common import debug
+ 
+ BOND_CODE_WIDTH = 50        # space for bonds - generous upfront, will be trimmed at the end
+ TERSE_LINE_WIDTH = 75       # in terse code format, force linebreaks
+@@ -457,7 +457,7 @@ def strip_output(output_list):
+ 
+ 
+ def format_output(options, output_list):
+-    '''
++    r'''
+     optionally wrap the translated output into a command,
+     to ease inclusion in LaTeX documents with \input
+     '''
+diff --git a/mol2chemfig/common.py b/mol2chemfig/common.py
+index 8b5c564..e4126c8 100644
+--- a/mol2chemfig/common.py
++++ b/mol2chemfig/common.py
+@@ -2,7 +2,7 @@
+ common settings and a bit of infrastructure
+ '''
+ import sys
+-from options import getParser
++from .options import getParser
+ 
+ _debug = False
+ 
+@@ -17,7 +17,7 @@ def debug(*args):
+     if not _debug:
+         return
+     args = [str(a) for a in args]
+-    print >> _debug_file, " ".join(args)
++    print(" ".join(args), file=_debug_file)
+ 
+ class MCFError(Exception):
+     '''
+@@ -26,7 +26,7 @@ class MCFError(Exception):
+     pass
+ 
+ # pubchem url for retrieving sdf for numerical IDs
+-pubchem_url = r"http://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?cid=%s&disopt=DisplaySDF"
++pubchem_url = r"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/%s/SDF"
+ 
+ _version_blurb = '''
+ %(progname)s version %(version)s
+@@ -103,7 +103,7 @@ class Counter(object):
+             self._d[val] += 1
+ 
+     def most_common(self):
+-        lst = self._d.items()
++        lst = list(self._d.items())
+         lst.sort(key=lambda pair: pair[1])
+ 
+         return lst[-1][0]
+diff --git a/mol2chemfig/molecule.py b/mol2chemfig/molecule.py
+index 89f57a1..3d0ee5a 100644
+--- a/mol2chemfig/molecule.py
++++ b/mol2chemfig/molecule.py
+@@ -4,11 +4,11 @@ parse a molfile molecule and render to chemfig code
+ 
+ import math, sys
+ 
+-import chemfig_mappings as cfm
+-from common import MCFError, Counter, debug
++from . import chemfig_mappings as cfm
++from .common import MCFError, Counter, debug
+ 
+-from atom import Atom
+-from bond import Bond, DummyFirstBond, AromaticRingBond, compare_positions
++from .atom import Atom
++from .bond import Bond, DummyFirstBond, AromaticRingBond, compare_positions
+ 
+ from indigo import IndigoException
+ 
+@@ -24,7 +24,7 @@ class Molecule(object):
+         self.atoms = self.parseAtoms()
+ 
+         # now it's time to flip and flop the coordinates
+-        for atom in self.atoms.values():
++        for atom in list(self.atoms.values()):
+             if self.options['flip_horizontal']:
+                 atom.x = -atom.x
+             if self.options['flip_vertical']:
+@@ -35,7 +35,7 @@ class Molecule(object):
+         # work out the angles for each atom - this is used for
+         # positioning of implicit hydrogens and charges.
+ 
+-        for connection, bond in self.bonds.items():
++        for connection, bond in list(self.bonds.items()):
+             first_idx, last_idx = connection
+             self.atoms[first_idx].bond_angles.append(bond.angle)
+ 
+@@ -81,7 +81,7 @@ class Molecule(object):
+ 
+         # let each atom work out its preferred quadrant for placing
+         # hydrogens or charges
+-        for atom in self.atoms.values():
++        for atom in list(self.atoms.values()):
+             atom.score_angles()
+ 
+         # finally, render the thing and cache the result.
+@@ -233,7 +233,7 @@ class Molecule(object):
+                     bond = self.bonds[combo]
+                     break
+             else: # referenced bond doesn't exist
+-                raise MCFError, "bond %s-%s doesn't exist" % (start1, end1)
++                raise MCFError("bond %s-%s doesn't exist" % (start1, end1))
+ 
+             # very special case: the bond _might_ already be the very
+             # last one to be rendered - then we just tag it
+@@ -295,7 +295,7 @@ class Molecule(object):
+ 
+             scored.append((distance, len(bond.descendants), bond))
+ 
+-        scored.sort()
++        scored.sort(key=lambda entry: entry[:2])
+         return scored[-1][-1]
+ 
+ 
+@@ -308,17 +308,17 @@ class Molecule(object):
+         if self.options['entry_atom'] is not None:
+             entry_atom = self.atoms.get(self.options['entry_atom'] - 1) # -> zero index
+             if entry_atom is None:
+-                raise MCFError, 'Invalid entry atom number'
++                raise MCFError('Invalid entry atom number')
+ 
+         else: # pick a default atom with few neighbors
+-            atoms = self.atoms.values()
++            atoms = list(self.atoms.values())
+             atoms.sort(key=lambda atom: len(atom.neighbors))
+             entry_atom = atoms[0]
+ 
+         if self.options['exit_atom'] is not None:
+             exit_atom = self.atoms.get(self.options['exit_atom'] - 1) # -> zero index
+             if exit_atom is None:
+-                raise MCFError, 'Invalid exit atom number'
++                raise MCFError('Invalid exit atom number')
+         else:
+             exit_atom = None
+ 
+@@ -567,7 +567,7 @@ class Molecule(object):
+ 
+         # prefer aromatic rings to nonaromatic ones, so that double bonds on
+         # fused rings go preferably into aromatic rings
+-        all_rings.sort()
++        all_rings.sort(key=lambda entry: entry[0])
+ 
+         for is_aromatic, ring in reversed(all_rings):
+             self.annotateRing(ring, is_aromatic)
+@@ -658,7 +658,7 @@ class Molecule(object):
+ 
+ 
+     def dimensions(self):
+-        '''
++        r'''
+         this calculates the approximate width and height
+         of the rendered molecule, in units of chemfig
+         standard bond length (multiply with chemfig's
+@@ -675,7 +675,7 @@ class Molecule(object):
+         sinalpha = math.sin(alpha)
+         cosalpha = math.cos(alpha)
+ 
+-        for atom in self.atoms.values():
++        for atom in list(self.atoms.values()):
+             x, y = atom.x, atom.y
+ 
+             xt = x * cosalpha - y * sinalpha
+diff --git a/mol2chemfig/optionparser.py b/mol2chemfig/optionparser.py
+index 6c85626..f585dac 100644
+--- a/mol2chemfig/optionparser.py
++++ b/mol2chemfig/optionparser.py
+@@ -18,7 +18,7 @@ class OptionError(Exception):
+     pass
+ 
+ class Option(object):
+-    collapseWs = re.compile('\s+')
++    collapseWs = re.compile(r'\s+')
+ 
+     form_tag_template = "<!-- Option class needs to define a valid form tag template -->"
+ 
+@@ -195,7 +195,7 @@ class SelectOption(Option):
+         try:
+             return self.valid_range[0]
+         except (TypeError, IndexError):
+-            raise OptionError, 'valid_range does not supply default'
++            raise OptionError('valid_range does not supply default')
+ 
+ 
+     def _validate(self, value):
+@@ -212,7 +212,7 @@ class SelectOption(Option):
+         options = []
+ 
+         if not self.default in self.valid_range: # why am I doing this here?
+-            raise OptionError, 'invalid default'
++            raise OptionError('invalid default')
+ 
+         for option in self.valid_range:
+             if option == value:
+@@ -295,9 +295,9 @@ class OptionParser(object):
+ 
+     def append(self, option):
+         if option.short_name in self._options_by_name:
+-            raise OptionError, "option name clash %s" % option.short_name
++            raise OptionError("option name clash %s" % option.short_name)
+         if option.long_name in self._options_by_name:
+-            raise OptionError, "option name clash %s" % option_short_name
++            raise OptionError("option name clash %s" % option_short_name)
+ 
+         self._options_by_name[option.short_name] = option.key
+         self._options_by_name[option.long_name] = option.key
+@@ -311,7 +311,7 @@ class OptionParser(object):
+         '''
+         required by the web form front end
+         '''
+-        return self._option_by_key.keys()
++        return list(self._option_by_key.keys())
+ 
+ 
+     def option_values(self):
+@@ -336,7 +336,7 @@ class OptionParser(object):
+         '''
+         warnings = []
+ 
+-        for key, value in fields.items():
++        for key, value in list(fields.items()):
+             option = self._options_by_key[key]
+             if not option.validate_form_value(value):
+                 msg = 'Invalid value %s for option %s ignored' % (value, option.form_text)
+@@ -368,7 +368,7 @@ class OptionParser(object):
+                 msg = ["rejected value '%s' for option %s" % (value, optname)]
+                 msg.append('Option usage:')
+                 msg.extend(option.format_help())
+-                raise OptionError, '\n'.join(msg)
++                raise OptionError('\n'.join(msg))
+ 
+         return self.option_values(), args
+ 
+@@ -427,7 +427,7 @@ if __name__ == '__main__':  # test it
+                 'count',
+                 'c',
+                 default=5,
+-                valid_range=range(10),
++                valid_range=list(range(10)),
+                 help_text="how many apples to buy"))
+ 
+     p.append(StringOption(
+@@ -451,8 +451,8 @@ if __name__ == '__main__':  # test it
+     rawinput = "-a -c 6 -p LP alpha beta gamma"
+     options, args = p.process_cli(rawinput)
+ 
+-    print 'options', options
+-    print 'args', args
+-    print
+-    print p.format_help()
+-    print
++    print('options', options)
++    print('args', args)
++    print()
++    print(p.format_help())
++    print()
+diff --git a/mol2chemfig/options.py b/mol2chemfig/options.py
+index a134c79..7c4731c 100644
+--- a/mol2chemfig/options.py
++++ b/mol2chemfig/options.py
+@@ -2,7 +2,7 @@
+ option declarations. The options will be used to update the
+ settings dict in module common.
+ '''
+-from optionparser import *
++from .optionparser import *
+ 
+ def getParser():
+     '''
+@@ -217,15 +217,15 @@ def getParser():
+ 
+ if __name__ == '__main__': # test code
+     parser = getParser()
+-    print parser.format_help(indent=32,linewidth=80,separator='')
+-    print
++    print(parser.format_help(indent=32,linewidth=80,separator=''))
++    print()
+     shorts, longs = parser.format_for_getopt()
+-    print longs
+-    print shorts
++    print(longs)
++    print(shorts)
+ 
+     # list unused option letters
+     from string import ascii_lowercase as letters
+-    print "unused short options:", ','.join(set(letters) - set(shorts))
++    print("unused short options:", ','.join(set(letters) - set(shorts)))
+ 
+     #print
+     #tags = parser.form_tags()
+diff --git a/mol2chemfig/pdfgen.py b/mol2chemfig/pdfgen.py
+index b4d524b..d71520b 100644
+--- a/mol2chemfig/pdfgen.py
++++ b/mol2chemfig/pdfgen.py
+@@ -2,20 +2,49 @@
+ generate a pdf from a parsed mol2chemfig molecule.
+ return the result in a string.
+ '''
+-import os, shutil
++import os, shutil, subprocess
+ from tempfile import mkdtemp
+ 
+ latexfn = 'molecule.tex'
+ pdfname = 'molecule.pdf'
+-latexcmd = 'pdflatex -interaction=nonstopmode %s > /dev/null' % latexfn
++pdflatex = 'pdflatex'
++latex_timeout = 60
+ 
+-m2pkg_path = '/home/py-chemist/Projects/git_control/mol_2_chemfig/mol2chemfig'
++m2pkg_path = os.path.dirname(os.path.abspath(__file__))
+ pkg = '/mol2chemfig.sty'
+ 
+-def pdfgen(mol):
++def compile_latex(latex):
++    '''
++    run pdflatex in a scratch directory and return the pdf bytes,
++    or None if no pdf was produced.
++    '''
+     tempdir = mkdtemp()
+-    os.symlink(m2pkg_path + pkg, tempdir + pkg)
++    try:
++        os.symlink(m2pkg_path + pkg, tempdir + pkg)
++
++        with open(os.path.join(tempdir, latexfn), 'w') as f:
++            f.write(latex)
++
++        try:
++            subprocess.run([pdflatex, '-interaction=nonstopmode',
++                            '-no-shell-escape', latexfn],
++                           cwd=tempdir,
++                           stdin=subprocess.DEVNULL,
++                           stdout=subprocess.DEVNULL,
++                           stderr=subprocess.DEVNULL,
++                           timeout=latex_timeout)
++        except (OSError, subprocess.TimeoutExpired):
++            return None
++
++        try:
++            with open(os.path.join(tempdir, pdfname), 'rb') as f:
++                return f.read()
++        except IOError:
++            return None
++    finally:
++        shutil.rmtree(tempdir)
+ 
++def pdfgen(mol):
+     chemfig = mol.render_server()    
+     width, height = mol.dimensions()
+ 
+@@ -30,29 +59,15 @@ def pdfgen(mol):
+     height_all = height
+     
+     latex = latex_template % locals()
+-    
+-    curdir = os.getcwd()
+-    os.chdir(tempdir)
+-
+-    open(latexfn, 'w').write(latex)
+-    os.system(latexcmd)
+ 
+-    try:
+-        pdfstring = open(pdfname).read()
+-    except IOError:
++    pdfstring = compile_latex(latex)
++    if pdfstring is None:
+         return False, None
+-    finally:
+-        os.chdir(curdir)
+-        shutil.rmtree(tempdir)
+ 
+     return True, pdfstring
+     
+ def update_pdf(mol):
+-    tempdir = mkdtemp()
+-    # create the symlink to the mol2chemfig package
+-    os.symlink(m2pkg_path + pkg, tempdir + pkg)
+-
+-    chemfig = "\chemfig {"+ mol +"}"
++    chemfig = r"\chemfig {"+ mol +"}"
+     
+     atomsep = 16
+     fixed_extra = 28    
+@@ -62,19 +77,9 @@ def update_pdf(mol):
+     
+     latex = latex_template % locals()
+ 
+-    curdir = os.getcwd()
+-    os.chdir(tempdir)
+-
+-    open(latexfn, 'w').write(latex)
+-    os.system(latexcmd)
+-
+-    try:
+-        pdfstring = open(pdfname).read()
+-    except IOError:
++    pdfstring = compile_latex(latex)
++    if pdfstring is None:
+         return False, None
+-    finally:
+-        os.chdir(curdir)
+-        shutil.rmtree(tempdir)
+ 
+     return True, pdfstring
+ 
+@@ -83,13 +88,17 @@ def update_pdf(mol):
+ latex_template = r'''
+ \documentclass{minimal}
+ \usepackage{xcolor, mol2chemfig}
+-\usepackage[margin=(margin)spt,papersize={%(width)spt, %(height)spt}]{geometry}
++\usepackage[margin=0pt,papersize={%(width)spt, %(height)spt}]{geometry}
+ 
+ \usepackage[helvet]{sfmath}
+-\setcrambond{2.5pt}{0.4pt}{1.0pt}
+-\setbondoffset{1pt}
+-\setdoublesep{2pt}
+-\setatomsep{%(atomsep)spt}
++\setchemfig{
++    cram width=2.5pt,
++    cram dash width=0.4pt,
++    cram dash sep=1.0pt,
++    bond offset=1pt,
++    double bond sep=2pt,
++    atom sep=%(atomsep)spt
++}
+ \renewcommand{\printatom}[1]{\fontsize{8pt}{10pt}\selectfont{\ensuremath{\mathsf{#1}}}}
+ 
+ \setlength{\parindent}{0pt}
+diff --git a/mol2chemfig/processor.py b/mol2chemfig/processor.py
+index 6d83561..3d361d8 100644
+--- a/mol2chemfig/processor.py
++++ b/mol2chemfig/processor.py
+@@ -3,10 +3,10 @@ accept input from command line or through the web and
+ return the result.
+ '''
+ 
+-import urllib, os.path, traceback
++import urllib.request, urllib.parse, urllib.error, os.path, traceback
+ from indigo import Indigo, IndigoException
+ 
+-import common, options, molecule
++from . import common, options, molecule
+ 
+ class HelpError(common.MCFError):
+     pass
+@@ -58,16 +58,16 @@ class Processor(object):
+         if not self.rawargs and not self.data:
+             ht = self.help_text()
+ 
+-            raise HelpError, ht
++            raise HelpError(ht)
+ 
+         # parse options and arguments
+         try:
+             parsed_options, datalist = self.optionparser.process_cli(self.rawargs)
+-        except Exception, msg:
++        except Exception as msg:
+             if str(msg).endswith('not recognized'): # getopt error
+                 msg = str(msg) + \
+                       ". Try %s --help to see a list of available options." % self.progname
+-            raise HelpError, msg
++            raise HelpError(msg)
+ 
+         # if we get here, we have parsed options and a possibly empty datalist
+         self.options.update(parsed_options)
+@@ -75,9 +75,9 @@ class Processor(object):
+         # before we go on to check on the data, we will satisfy help requests,
+         # which we treat like an error
+         if self.options['help']:
+-            raise HelpError, self.help_text()
++            raise HelpError(self.help_text())
+         elif self.options['version']:
+-            raise HelpError, self.version_text()
++            raise HelpError(self.version_text())
+ 
+         if self.data is not None:
+             datalist.append(self.data)
+@@ -87,8 +87,8 @@ class Processor(object):
+ 
+         if len(datalist) != 1:
+             if not datalist:
+-                raise common.MCFError, "No input data supplied"
+-            raise common.MCFError, "Please give only one file or data string as input"
++                raise common.MCFError("No input data supplied")
++            raise common.MCFError("Please give only one file or data string as input")
+ 
+         data = datalist[0]
+ 
+@@ -96,7 +96,7 @@ class Processor(object):
+             try:
+                 data = open(data).read()
+             except IOError:
+-                raise common.MCFError, "Can't read file %s" % data
++                raise common.MCFError("Can't read file %s" % data)
+ 
+         self.data_string = data
+ 
+@@ -108,7 +108,7 @@ class Processor(object):
+         parsed_options, warnings = self.optionparser.process_form_fields(self.formfields)
+ 
+         if warnings:
+-            raise common.MCFError, '<br/>\n'.join(warnings)
++            raise common.MCFError('<br/>\n'.join(warnings))
+ 
+         # no warnings ...
+         self.options.update(parsed_options)
+@@ -154,9 +154,9 @@ class Processor(object):
+         if pubchemId is not None:
+             try:
+                 url = common.pubchem_url % pubchemId
+-                pubchemContent = urllib.urlopen(url).read()
++                pubchemContent = urllib.request.urlopen(url).read().decode('utf-8')
+             except IOError:
+-                raise common.MCFError, 'No connection to PubChem'
++                raise common.MCFError('No connection to PubChem')
+ 
+             self.data_string = pubchemContent
+ 
+@@ -166,7 +166,7 @@ class Processor(object):
+         try:
+             tkmol = Indigo().loadMolecule(self.data_string)
+         except IndigoException:
+-            raise common.MCFError, "Invalid input data"
++            raise common.MCFError("Invalid input data")
+ 
+         hydrogens = self.options['hydrogens']
+ 
+@@ -197,15 +197,13 @@ def process(rawargs=None,
+     try:
+         mol = p.process()
+ 
+-    except HelpError, msg:
++    except HelpError as msg:
+         return False, msg
+ 
+-    except common.MCFError, msg:    # anticipated error - brief message enough
+-        msg = traceback.format_exc().splitlines()[-1]
+-        msg = msg[len('MCFError: '):]
+-        return False, msg
++    except common.MCFError as msg:    # anticipated error - brief message enough
++        return False, str(msg)
+ 
+-    except Exception, msg:               # unexpected error - get full traceback
++    except Exception as msg:               # unexpected error - get full traceback
+         tb = traceback.format_exc()
+         return False, tb
+ 
+diff --git a/mol2chemfig/webclient.py b/mol2chemfig/webclient.py
+index 2822be6..026ac58 100644
+--- a/mol2chemfig/webclient.py
++++ b/mol2chemfig/webclient.py
+@@ -5,7 +5,7 @@ Through-the-web command line client for mol2chemfig.
+ Depends only on Python standard library modules.
+ '''
+ 
+-import sys, httplib, urllib
++import sys, http.client, urllib.request, urllib.parse, urllib.error
+ 
+ serverUrl = "localhost:80"
+ servlet = "/mol2chemfig/test"
+@@ -14,10 +14,10 @@ def rpc(**data):
+     '''
+     send rpc request and return response data
+     '''
+-    params = urllib.urlencode(data)
++    params = urllib.parse.urlencode(data)
+     headers = {"Content-type": "application/x-www-form-urlencoded"}
+ 
+-    conn = httplib.HTTPConnection(serverUrl)
++    conn = http.client.HTTPConnection(serverUrl)
+     conn.request("POST", servlet, params, headers)
+ 
+     response = conn.getresponse()
+@@ -47,5 +47,5 @@ else:
+ 
+ result = rpc(progname=progname, options=rawoptions, cargo=data)
+ 
+-print result
++print(result)
+ 
+diff --git a/templates/layout.html b/templates/layout.html
+index 82864eb..f236e3e 100644
+--- a/templates/layout.html
++++ b/templates/layout.html
+@@ -5,10 +5,10 @@
+         <meta charset="UTF-8"/>
+ 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+ 	<link rel="stylesheet" src="//normalize-css.googlecode.com/svn/trunk/normalize.css" />
+-	<link href="http://fonts.googleapis.com/css?family=Ubuntu" rel="stylesheet" type="text/css">
+-	<link href="http://fonts.googleapis.com/css?family=Ubuntu+Mono" rel="stylesheet" type="text/css">
++	<link href="https://fonts.googleapis.com/css?family=Ubuntu" rel="stylesheet" type="text/css">
++	<link href="https://fonts.googleapis.com/css?family=Ubuntu+Mono" rel="stylesheet" type="text/css">
+ 	<link href="{{ url_for('static', filename='css/main.css')}}" rel='stylesheet' type='text/css'>
+-	<script src="http://code.jquery.com/jquery-1.11.0.min.js"></script>
++	<script src="https://code.jquery.com/jquery-1.11.0.min.js"></script>
+ 	<script src="{{ url_for('static', filename='js/ViewerJS') }}"></script>
+ 	<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+ 	
