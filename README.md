@@ -1,5 +1,7 @@
 # mol2chemfig-web flake
 
+Thrown together by Claude. Use at your own risk.
+
 Nix flake for [mol2chemfig-web](https://github.com/py-chemist/mol2chemfig-web),
 the Flask front end for mol2chemfig (SMILES / molfile → chemfig code + PDF).
 
